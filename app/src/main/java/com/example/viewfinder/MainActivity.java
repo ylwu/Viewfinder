@@ -13,6 +13,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.hardware.Camera;
@@ -37,13 +38,14 @@ public class MainActivity extends Activity
     String asterisks = " *******************************************"; // for noticable marker in log
     protected static int mCam = 0;      // the number of the camera to use (0 => rear facing)
     protected static Camera mCamera = null;
-    int nPixels = 480 * 640;            // approx number of pixels desired in preview
+    int nPixels = 240 * 320;            // approx number of pixels desired in preview
     protected static int mCameraHeight;   // preview height (determined later)
     protected static int mCameraWidth;    // preview width
     protected static Preview mPreview;
     protected static DrawOnTop mDrawOnTop;
     protected static LayoutParams mLayoutParams = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
     private static boolean DBG=true;
+    float mLearningRate = (float) 0.1;
 
 //    static boolean bDisplayInfoFlag = true;	// show info about display  in log file
 //    static boolean nCameraInfoFlag = true;	// show info about cameras in log file
@@ -170,6 +172,10 @@ public class MainActivity extends Activity
         Bitmap mBitmap;
         byte[] mYUVData;
         int[] mRGBData;
+        byte[] mLumaData;
+        float[] mLumaMean;
+        float[] mLumaVar;
+        boolean[] mLumaChanged;
         int mImageWidth, mImageHeight;
         int[] mRedHistogram;
         int[] mGreenHistogram;
@@ -185,6 +191,7 @@ public class MainActivity extends Activity
         double redMean, greenMean, blueMean;	// computed results
         double redStdDev, greenStdDev, blueStdDev;
         String TAG = "DrawOnTop";       // for logcat output
+        int frameCount;
 
         public DrawOnTop (Context context)
         { // constructor
@@ -199,6 +206,7 @@ public class MainActivity extends Activity
             mBitmap = null;	// will be set up later in Preview - PreviewCallback
             mYUVData = null;
             mRGBData = null;
+            mLumaData = null;
             mRedHistogram = new int[256];
             mGreenHistogram = new int[256];
             mBlueHistogram = new int[256];
@@ -206,6 +214,7 @@ public class MainActivity extends Activity
             if (DBG) Log.i(TAG, "DrawOnTop textsize " + mTextsize);
             mLeading = mTextsize * 6 / 5;    // adjust line spacing
             if (DBG) Log.i(TAG, "DrawOnTop Leading " + mLeading);
+            frameCount = 0;
 
         }
 
@@ -225,51 +234,64 @@ public class MainActivity extends Activity
         @Override
         protected void onDraw (Canvas canvas)
         {
-            String TAG="onDraw";
-            if (mBitmap == null) {	// sanity check
-                Log.w(TAG, "mBitMap is null");
-                super.onDraw(canvas);
-                return;	// because not yet set up
+            if (frameCount < 10){
+                frameCount ++;
             }
 
-            // Convert image from YUV to RGB format:
-            decodeYUV420SP(mRGBData, mYUVData, mImageWidth, mImageHeight);
+            String TAG="onDraw";
+            if (mBitmap == null) {    // sanity check
+                Log.w(TAG, "mBitMap is null");
+                super.onDraw(canvas);
+                return;    // because not yet set up
+            }
 
-            // Now do some image processing here:
+            if (frameCount >= 10){
+                for (int i = 0; i < mImageHeight * mImageWidth; i++){
+                    if (Math.abs(mLumaData[i] - mLumaMean[i]) > 3 * Math.sqrt(mLumaVar[i])){
+                        mLumaChanged[i] = true;
+                    } else {
+                        mLumaChanged[i] = false;
+                    }
+                }
 
-            // Calculate histograms
-            calculateIntensityHistograms(mRGBData, mRedHistogram, mGreenHistogram, mBlueHistogram,
-                    mImageWidth, mImageHeight);
+                // Ignore the edge for simplicity
+                for (int y = 1; y < mImageHeight -1 ; y++){
+                    for (int x = 1; x < mImageWidth -1 ; x++){
+                        if (numOfChangedNeighbors(mLumaChanged,x,y,mImageWidth) > 6){
+                            mBitmap.setPixel(x,y,Color.RED);
+                        } else {
+                            mBitmap.setPixel(x,y,Color.TRANSPARENT);
+                        }
+                    }
+                }
 
-            // calculate means and standard deviations
-            calculateMeanAndStDev(mRedHistogram, mGreenHistogram, mBlueHistogram, mImageWidth * mImageHeight);
+                Rect bitmapRect = new Rect(0,0,mImageWidth,mImageHeight);
+                Rect canvasRect = new Rect(0,0,canvas.getWidth(),canvas.getHeight());
+                canvas.drawBitmap(mBitmap,bitmapRect,canvasRect,new Paint());
+            }
 
-            // Finally, use the results to draw things on top of screen:
-            int canvasHeight = canvas.getHeight();
-            int canvasWidth = canvas.getWidth();
-            int newImageWidth = canvasWidth - 200;
-            int marginWidth = (canvasWidth - newImageWidth) / 2;
 
-            // Draw mean (truncate to integer) text on screen
-            String imageMeanStr = "Mean Intencity (Red,Green,Blue): " + String.format("%4d", (int) redMean) + ", " +
-                    String.format("%4d", (int) greenMean) + ", " + String.format("%4d", (int) blueMean);
-            drawTextOnBlack(canvas, imageMeanStr, marginWidth+10, canvasHeight - 2*mLeading, mPaintYellow);
-            // Draw standard deviation (truncate to integer) text on screen
-            String imageStdDevStr = "Intencity Std (Red,Green,Blue): " + String.format("%4d", (int) redStdDev) + ", " +
-                    String.format("%4d", (int) greenStdDev) + ", " + String.format("%4d", (int) blueStdDev);
-            drawTextOnBlack(canvas, imageStdDevStr, marginWidth+10, canvasHeight - mLeading, mPaintYellow);
-
-            float barWidth = ((float) newImageWidth) / 256;
-            // Draw red intensity histogram
-            drawHistogram(canvas, mPaintRed, mRedHistogram, nPixels, 100, marginWidth, barWidth);
-            // Draw green intensity histogram
-            drawHistogram(canvas, mPaintGreen, mGreenHistogram, nPixels, 200, marginWidth, barWidth);
-            // Draw blue intensity histogram
-            drawHistogram(canvas, mPaintBlue, mBlueHistogram, nPixels, 300, marginWidth, barWidth);
+            for (int i = 0; i < mImageHeight * mImageWidth; i++){
+                if (!mLumaChanged[i]){
+                    mLumaMean[i] = (1-mLearningRate) * mLumaMean[i] + mLearningRate * mLumaData[i];
+                    mLumaVar[i] = (1-mLearningRate) * mLumaVar[i] + mLearningRate * (mLumaData[i] - mLumaMean[i]) * (mLumaData[i] - mLumaMean[i]);
+                }
+            }
 
             super.onDraw(canvas);
 
         } // end onDraw method
+
+        public int numOfChangedNeighbors(boolean[] pixels, int x, int y, int width){
+            int total = 0;
+            for (int dx = -1; dx <= 1; dx++){
+                for (int dy = -1; dy <= 1; dy++){
+                    if (dx == 0 && dy == 0) continue;
+                    total +=  pixels[width * (y + dy) + x+ dx] ? 1: 0;
+                }
+            }
+            return total;
+        }
 
         public void decodeYUV420SP (int[] rgb, byte[] yuv420sp, int width, int height)
         { // convert image in YUV420SP format to RGB format
@@ -449,8 +471,13 @@ public class MainActivity extends Activity
                     if ((mDrawOnTop == null) || mFinished) return;
                     if (mDrawOnTop.mBitmap == null)  // need to initialize the drawOnTop companion?
                         setupArrays(data, camera);
+
                     // Pass YUV image data to draw-on-top companion
-                    System.arraycopy(data, 0, mDrawOnTop.mYUVData, 0, data.length);
+                    //System.arraycopy(data, 0, mDrawOnTop.mYUVData, 0, data.length);
+
+                    // Pass only the Y channel (brightness) data to mLumaData
+                    System.arraycopy(data,0,mDrawOnTop.mLumaData,0,mDrawOnTop.mLumaData.length);
+
                     mDrawOnTop.invalidate();
                 }
             };
@@ -496,6 +523,9 @@ public class MainActivity extends Activity
             // this will be sorted out with a setParamaters() on mCamera
             Camera.Parameters parameters = mCamera.getParameters();
             parameters.setPreviewSize(mCameraWidth, mCameraHeight);
+            if (parameters.isAutoExposureLockSupported()){
+                parameters.setAutoExposureLock(true);
+            }
             // check whether following is within PreviewFpsRange ?
             parameters.setPreviewFrameRate(15);	// deprecated
             // parameters.setFocusMode(Camera.Parameters.FOCUS_MODE_AUTO);
@@ -517,8 +547,12 @@ public class MainActivity extends Activity
             mDrawOnTop.mImageWidth = params.getPreviewSize().width;
             if (DBG) Log.i(TAG, "height " + mDrawOnTop.mImageHeight + " width " + mDrawOnTop.mImageWidth);
             mDrawOnTop.mBitmap = Bitmap.createBitmap(mDrawOnTop.mImageWidth,
-                    mDrawOnTop.mImageHeight, Bitmap.Config.RGB_565);
+                    mDrawOnTop.mImageHeight, Bitmap.Config.ARGB_8888);
             mDrawOnTop.mRGBData = new int[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
+            mDrawOnTop.mLumaData = new byte[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
+            mDrawOnTop.mLumaMean = new float[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
+            mDrawOnTop.mLumaVar = new float[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
+            mDrawOnTop.mLumaChanged = new boolean[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
             if (DBG) Log.i(TAG, "data length " + data.length); // should be width*height*3/2 for YUV format
             mDrawOnTop.mYUVData = new byte[data.length];
             int dataLengthExpected = mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight * 3 / 2;
