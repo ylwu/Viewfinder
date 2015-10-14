@@ -13,8 +13,6 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.Rect;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.hardware.Camera;
 import android.hardware.Camera.PreviewCallback;
@@ -173,6 +171,7 @@ public class MainActivity extends Activity
         byte[] mYUVData;
         int[] mRGBData;
         byte[] mLumaData;
+        byte[] preLumaData;
         float[] mLumaMean;
         float[] mLumaVar;
         boolean[] mLumaChanged;
@@ -187,11 +186,11 @@ public class MainActivity extends Activity
         Paint mPaintBlue;
         int mTextsize = 50;		// controls size of text on screen
         int mLeading;			// spacing between text lines
-        RectF barRect = new RectF();	// used in drawing histogram
-        double redMean, greenMean, blueMean;	// computed results
-        double redStdDev, greenStdDev, blueStdDev;
         String TAG = "DrawOnTop";       // for logcat output
-        int frameCount;
+        boolean isFirstFrame;
+
+        float trackingX;
+        float trackingY;
 
         public DrawOnTop (Context context)
         { // constructor
@@ -210,11 +209,10 @@ public class MainActivity extends Activity
             mRedHistogram = new int[256];
             mGreenHistogram = new int[256];
             mBlueHistogram = new int[256];
-            barRect = new RectF();    // moved here to reduce GC
             if (DBG) Log.i(TAG, "DrawOnTop textsize " + mTextsize);
             mLeading = mTextsize * 6 / 5;    // adjust line spacing
             if (DBG) Log.i(TAG, "DrawOnTop Leading " + mLeading);
-            frameCount = 0;
+            isFirstFrame = true;
 
         }
 
@@ -234,9 +232,6 @@ public class MainActivity extends Activity
         @Override
         protected void onDraw (Canvas canvas)
         {
-            if (frameCount < 10){
-                frameCount ++;
-            }
 
             String TAG="onDraw";
             if (mBitmap == null) {    // sanity check
@@ -244,43 +239,88 @@ public class MainActivity extends Activity
                 super.onDraw(canvas);
                 return;    // because not yet set up
             }
-
-            if (frameCount >= 10){
-                for (int i = 0; i < mImageHeight * mImageWidth; i++){
-                    if (Math.abs(mLumaData[i] - mLumaMean[i]) > 3 * Math.sqrt(mLumaVar[i])){
-                        mLumaChanged[i] = true;
-                    } else {
-                        mLumaChanged[i] = false;
-                    }
-                }
-
-                // Ignore the edge for simplicity
-                for (int y = 1; y < mImageHeight -1 ; y++){
-                    for (int x = 1; x < mImageWidth -1 ; x++){
-                        if (numOfChangedNeighbors(mLumaChanged,x,y,mImageWidth) > 6){
-                            mBitmap.setPixel(x,y,Color.RED);
-                        } else {
-                            mBitmap.setPixel(x,y,Color.TRANSPARENT);
-                        }
-                    }
-                }
-
-                Rect bitmapRect = new Rect(0,0,mImageWidth,mImageHeight);
-                Rect canvasRect = new Rect(0,0,canvas.getWidth(),canvas.getHeight());
-                canvas.drawBitmap(mBitmap,bitmapRect,canvasRect,new Paint());
+            if (isFirstFrame){
+                System.arraycopy(mLumaData,0,preLumaData,0,mLumaData.length);
+                isFirstFrame = false;
+                super.onDraw(canvas);
+                return;
             }
 
+            float[] Ex = computeGradientX(mLumaData,preLumaData,mImageHeight,mImageWidth);
+            float[] Ey = computeGradientY(mLumaData,preLumaData,mImageHeight,mImageWidth);
+            float[] Et = computeGradientT(mLumaData,preLumaData,mImageHeight,mImageWidth);
 
-            for (int i = 0; i < mImageHeight * mImageWidth; i++){
-                if (!mLumaChanged[i]){
-                    mLumaMean[i] = (1-mLearningRate) * mLumaMean[i] + mLearningRate * mLumaData[i];
-                    mLumaVar[i] = (1-mLearningRate) * mLumaVar[i] + mLearningRate * (mLumaData[i] - mLumaMean[i]) * (mLumaData[i] - mLumaMean[i]);
-                }
+            float delta =  (float)(crossProduct(Ex,Ex) * crossProduct(Ey,Ey) - Math.pow(crossProduct(Ex,Ey),2));
+            float u = (crossProduct(Ex,Ey) * crossProduct(Ey,Et) - crossProduct(Ey,Ey) * crossProduct(Ex,Et)) / delta;
+            float v = (crossProduct(Ex,Ey) * crossProduct(Ex,Et) - crossProduct(Ex,Ex) * crossProduct(Ey,Et)) / delta;
+
+            trackingX += u;
+            trackingY += v;
+
+            if (trackingX > mImageWidth || trackingY > mImageHeight || trackingX < 0 || trackingY < 0){
+                trackingX = mImageWidth / 2;
+                trackingY = mImageHeight / 2;
             }
+
+            // Finally, use the results to draw things on top of screen:
+            int canvasHeight = canvas.getHeight();
+            int canvasWidth = canvas.getWidth();
+            int newImageWidth = canvasWidth - 200;
+            int marginWidth = (canvasWidth - newImageWidth) / 2;
+
+            // draw tracking dots on screen;
+            drawTrackingPointOnCanvas(canvas,trackingX,trackingY,mPaintRed);
+
+
+            // Draw mean (truncate to integer) text on screen
+            String imageMeanStr = "Image motion (u,v): " + String.format("%4d", (int)(20 * u)) + ", " +
+                    String.format("%4d",  (int)(20 * v));
+            drawTextOnBlack(canvas, imageMeanStr, marginWidth+10, canvasHeight - 2*mLeading, mPaintYellow);
+
+//            for (int i = 0; i < mImageHeight * mImageWidth; i++){
+//                if (Math.abs(mLumaData[i] - mLumaMean[i]) > 3 * Math.sqrt(mLumaVar[i])){
+//                    mLumaChanged[i] = true;
+//                } else {
+//                    mLumaChanged[i] = false;
+//                }
+//            }
+//
+//            // Ignore the edge for simplicity
+//            for (int y = 1; y < mImageHeight -1 ; y++){
+//                for (int x = 1; x < mImageWidth -1 ; x++){
+//                    if (numOfChangedNeighbors(mLumaChanged,x,y,mImageWidth) > 6){
+//                        mBitmap.setPixel(x,y,Color.RED);
+//                    } else {
+//                        mBitmap.setPixel(x,y,Color.TRANSPARENT);
+//                    }
+//                }
+//            }
+
+//            Rect bitmapRect = new Rect(0,0,mImageWidth,mImageHeight);
+//            Rect canvasRect = new Rect(0,0,canvas.getWidth(),canvas.getHeight());
+//            canvas.drawBitmap(mBitmap,bitmapRect,canvasRect,new Paint());
+//
+//
+//            for (int i = 0; i < mImageHeight * mImageWidth; i++){
+//                if (!mLumaChanged[i]){
+//                    mLumaMean[i] = (1-mLearningRate) * mLumaMean[i] + mLearningRate * mLumaData[i];
+//                    mLumaVar[i] = (1-mLearningRate) * mLumaVar[i] + mLearningRate * (mLumaData[i] - mLumaMean[i]) * (mLumaData[i] - mLumaMean[i]);
+//                }
+//            }
+
+            System.arraycopy(mLumaData,0,preLumaData,0,mLumaData.length);
 
             super.onDraw(canvas);
 
         } // end onDraw method
+
+        public float crossProduct(float[] a, float[] b){
+            float sum = 0;
+            for (int i = 0; i< a.length; i++){
+                sum += a[i] * b[i];
+            }
+            return sum;
+        }
 
         public int numOfChangedNeighbors(boolean[] pixels, int x, int y, int width){
             int total = 0;
@@ -291,6 +331,48 @@ public class MainActivity extends Activity
                 }
             }
             return total;
+        }
+
+        public float[] computeGradientX(byte[] pixels, byte[] prePixels, int height, int width){
+            float[] gradientX = new float[(height-1) * (width-1)];
+            for (int y = 0; y < height -1; y++){
+                for (int x = 0; x < width -1; x++){
+                    gradientX[(width-1) * y + x] =
+                            ((float)(prePixels[width * y + x + 1] + prePixels[width * (y + 1) + x + 1] + pixels[width * y + x + 1]
+                            + pixels[width * (y + 1) + x + 1] - prePixels[width * y + x] - prePixels[width * (y + 1) + x]
+                            - pixels[width * y + x] - pixels[width * (y + 1) + x])) / 4;
+                }
+            }
+
+            return gradientX;
+        }
+
+        public float[] computeGradientY(byte[] pixels, byte[] prePixels, int height, int width){
+            float[] gradientY = new float[(height-1) * (width-1)];
+            for (int y = 0; y < height -1; y++){
+                for (int x = 0; x < width -1; x++){
+                    gradientY[(width-1) * y + x] =
+                            ((float)(prePixels[width * (y + 1) + x + 1] + prePixels[width * (y + 1) + x] + pixels[width * (y + 1) + x]
+                                    + pixels[width * (y + 1) + x + 1] - prePixels[width * y + x] - prePixels[width * y + x + 1]
+                                    - pixels[width * y + x] - pixels[width * y + x + 1])) / 4;
+                }
+            }
+
+            return gradientY;
+        }
+
+        public float[] computeGradientT(byte[] pixels, byte[] prePixels, int height, int width){
+            float[] gradientT = new float[(height-1) * (width-1)];
+            for (int y = 0; y < height -1; y++){
+                for (int x = 0; x < width -1; x++){
+                    gradientT[(width-1) * y + x] =
+                            ((float)(pixels[width * (y + 1) + x + 1] + pixels[width * (y + 1) + x] + pixels[width * y + x]
+                                    + pixels[width * y + x + 1] - prePixels[width * y + x] - prePixels[width * y + x + 1]
+                                    - prePixels[width * (y + 1) + x] - prePixels[width * (y + 1) + x + 1])) / 4;
+                }
+            }
+
+            return gradientT;
         }
 
         public void decodeYUV420SP (int[] rgb, byte[] yuv420sp, int width, int height)
@@ -362,31 +444,31 @@ public class MainActivity extends Activity
             }
         }
 
-        private void calculateMeanAndStDev (int mRedHistogram[], int mGreenHistogram[], int mBlueHistogram[], int nPixels)
-        {
-            // Calculate first and second moments (zeroth moment equals nPixels)
-            double red1stMoment = 0, green1stMoment = 0, blue1stMoment = 0;
-            double red2ndMoment = 0, green2ndMoment = 0, blue2ndMoment = 0;
-            double binsquared = 0;
-            for (int bin = 0; bin < 256; bin++) {
-                binsquared += (bin << 1) - 1;	// n^2 - (n-1)^2 = 2*n - 1
-                red1stMoment   += mRedHistogram[bin]   * bin;
-                green1stMoment += mGreenHistogram[bin] * bin;
-                blue1stMoment  += mBlueHistogram[bin]  * bin;
-                red2ndMoment   += mRedHistogram[bin]   * binsquared;
-                green2ndMoment += mGreenHistogram[bin] * binsquared;
-                blue2ndMoment  += mBlueHistogram[bin]  * binsquared;
-
-            } // bin
-
-            redMean   = red1stMoment   / nPixels;
-            greenMean = green1stMoment / nPixels;
-            blueMean  = blue1stMoment  / nPixels;
-
-            redStdDev   = Math.sqrt(red2ndMoment   / nPixels - redMean * redMean);
-            greenStdDev = Math.sqrt(green2ndMoment / nPixels - greenMean * greenMean);
-            blueStdDev  = Math.sqrt(blue2ndMoment  / nPixels - blueMean * blueMean);
-        }
+//        private void calculateMeanAndStDev (int mRedHistogram[], int mGreenHistogram[], int mBlueHistogram[], int nPixels)
+//        {
+//            // Calculate first and second moments (zeroth moment equals nPixels)
+//            double red1stMoment = 0, green1stMoment = 0, blue1stMoment = 0;
+//            double red2ndMoment = 0, green2ndMoment = 0, blue2ndMoment = 0;
+//            double binsquared = 0;
+//            for (int bin = 0; bin < 256; bin++) {
+//                binsquared += (bin << 1) - 1;	// n^2 - (n-1)^2 = 2*n - 1
+//                red1stMoment   += mRedHistogram[bin]   * bin;
+//                green1stMoment += mGreenHistogram[bin] * bin;
+//                blue1stMoment  += mBlueHistogram[bin]  * bin;
+//                red2ndMoment   += mRedHistogram[bin]   * binsquared;
+//                green2ndMoment += mGreenHistogram[bin] * binsquared;
+//                blue2ndMoment  += mBlueHistogram[bin]  * binsquared;
+//
+//            } // bin
+//
+//            redMean   = red1stMoment   / nPixels;
+//            greenMean = green1stMoment / nPixels;
+//            blueMean  = blue1stMoment  / nPixels;
+//
+//            redStdDev   = Math.sqrt(red2ndMoment   / nPixels - redMean * redMean);
+//            greenStdDev = Math.sqrt(green2ndMoment / nPixels - greenMean * greenMean);
+//            blueStdDev  = Math.sqrt(blue2ndMoment  / nPixels - blueMean * blueMean);
+//        }
 
         private void drawTextOnBlack (Canvas canvas, String str, int rPos, int cPos, Paint mPaint)
         { // make text stand out from background by providing thin black border
@@ -397,26 +479,32 @@ public class MainActivity extends Activity
             canvas.drawText(str, rPos, cPos, mPaint);
         }
 
-        private void drawHistogram (Canvas canvas, Paint mPaint,
-                                    int mHistogram[], int nPixels,
-                                    int mBottom, int marginWidth, float barWidth)
-        {
-            float barMaxHeight = 3000; // controls vertical scale of histogram
-            float barMarginHeight = 2;
-
-            barRect.bottom = mBottom;
-            barRect.left = marginWidth;
-            barRect.right = barRect.left + barWidth;
-            for (int bin = 0; bin < 256; bin++) {
-                float prob = (float) mHistogram[bin] / (float) nPixels;
-                barRect.top = barRect.bottom - Math.min(80, prob * barMaxHeight) - barMarginHeight;
-                canvas.drawRect(barRect, mPaintBlack);
-                barRect.top += barMarginHeight;
-                canvas.drawRect(barRect, mPaint);
-                barRect.left += barWidth;
-                barRect.right += barWidth;
-            }
+        private void drawTrackingPointOnCanvas(Canvas canvas, float trackingX, float trackingY, Paint mPaint){
+            int canvasX = (int)(trackingX / mImageWidth * canvas.getWidth());
+            int canvasY = (int)(trackingY / mImageHeight * canvas.getHeight());
+            canvas.drawCircle(canvasX,canvasY,10,mPaint);
         }
+
+//        private void drawHistogram (Canvas canvas, Paint mPaint,
+//                                    int mHistogram[], int nPixels,
+//                                    int mBottom, int marginWidth, float barWidth)
+//        {
+//            float barMaxHeight = 3000; // controls vertical scale of histogram
+//            float barMarginHeight = 2;
+//
+//            barRect.bottom = mBottom;
+//            barRect.left = marginWidth;
+//            barRect.right = barRect.left + barWidth;
+//            for (int bin = 0; bin < 256; bin++) {
+//                float prob = (float) mHistogram[bin] / (float) nPixels;
+//                barRect.top = barRect.bottom - Math.min(80, prob * barMaxHeight) - barMarginHeight;
+//                canvas.drawRect(barRect, mPaintBlack);
+//                barRect.top += barMarginHeight;
+//                canvas.drawRect(barRect, mPaint);
+//                barRect.left += barWidth;
+//                barRect.right += barWidth;
+//            }
+//        }
     }
 
 
@@ -477,7 +565,6 @@ public class MainActivity extends Activity
 
                     // Pass only the Y channel (brightness) data to mLumaData
                     System.arraycopy(data,0,mDrawOnTop.mLumaData,0,mDrawOnTop.mLumaData.length);
-
                     mDrawOnTop.invalidate();
                 }
             };
@@ -545,11 +632,15 @@ public class MainActivity extends Activity
             Camera.Parameters params = camera.getParameters();
             mDrawOnTop.mImageHeight = params.getPreviewSize().height;
             mDrawOnTop.mImageWidth = params.getPreviewSize().width;
+            mDrawOnTop.trackingX = mDrawOnTop.mImageWidth / 2;
+            mDrawOnTop.trackingY = mDrawOnTop.mImageHeight / 2;
+
             if (DBG) Log.i(TAG, "height " + mDrawOnTop.mImageHeight + " width " + mDrawOnTop.mImageWidth);
             mDrawOnTop.mBitmap = Bitmap.createBitmap(mDrawOnTop.mImageWidth,
                     mDrawOnTop.mImageHeight, Bitmap.Config.ARGB_8888);
             mDrawOnTop.mRGBData = new int[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
             mDrawOnTop.mLumaData = new byte[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
+            mDrawOnTop.preLumaData = new byte[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
             mDrawOnTop.mLumaMean = new float[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
             mDrawOnTop.mLumaVar = new float[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
             mDrawOnTop.mLumaChanged = new boolean[mDrawOnTop.mImageWidth * mDrawOnTop.mImageHeight];
